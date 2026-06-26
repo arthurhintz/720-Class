@@ -1,0 +1,71 @@
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(agridat)
+library(ggpubr)
+library(lme4)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+data("durban.splitplot")
+df <- durban.splitplot
+
+theme_set(theme_minimal())
+
+p_blocks <- 
+  df |> 
+  ggplot(aes(bed, row))+
+  geom_tile(aes(fill = block))+
+  geom_tile(color = "black", fill=NA)+
+  coord_fixed()
+
+p_wholeplot <-
+  df |> 
+  ggplot(aes(bed, row))+
+  geom_tile(aes(fill = fung))+
+  geom_tile(color = "black", fill=NA)+
+  coord_fixed()
+
+p_splitplot <- 
+df |>  
+  ggplot(aes(bed, row))+
+  geom_tile(aes(fill = gen), show.legend= F)+
+  geom_tile(color = "black", fill=NA)+
+  coord_fixed()
+
+ggarrange(p_blocks, p_wholeplot, p_splitplot, ncol = 1, nrow = 3)
+```
+
+The model can be described as 
+
+$$y_{ijk} = \mu + F_i + G_j + (F \times G)_{ij} + b_k + wp_{i(k)} + \varepsilon_{ijk},$$
+
+$$wp_{i(k)} \sim N(0,\sigma^2_{wp}),$$
+$$\varepsilon_{ijk} \sim N(0,\sigma^2_\varepsilon),$$
+
+where....
+
+
+```{r}
+# lmer(response ~ \mu + F_i + G_j + (F \times G)_{ij} + b_k + wp_{i(k)} )
+
+m <- lmer(yield ~ 1 + fung + gen + fung:gen + (1|block) + (1|fung:block), data = df)
+
+performance::check_model(m, check = "normality")
+plot(predict(m), resid(m))
+```
+
+
+```{r}
+library(emmeans)
+car::Anova(m, type =2)
+
+summary(m)
+plot(emmeans(m, ~gen:fung))
+getME(m, "b")
+```
+
+```{r}
+rnorm(4, 0, 0.1697)
+```
+

@@ -1,0 +1,87 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load R packages 
+```{r}
+library(tidyverse)
+library(glmmTMB)
+library(agridat)
+
+
+library(agricolae)
+library(ExpDes)
+
+```
+
+Fit models
+```{r}
+# load data
+data("omer.sorghum")
+df <- omer.sorghum |> filter(env == "E3")
+
+# find out how many levels for trt factor "genotype"
+n_distinct(df$gen)
+# find out how many blocks
+n_distinct(df$rep)
+
+# fit linear model
+m <- lm(yield ~ gen + rep, data= df)
+
+# inspect X
+model.matrix(m)
+
+
+# these options will affect the baseline for the estimation of the effects 
+# options(contrasts = c("contr.sum", "contr.poly"))
+# options(contrasts = c("contr.treatment", "contr.poly"))
+```
+
+```{r}
+# check for constant variance 
+plot(m$fitted.values, m$residuals)
+
+plot(m$fitted.values, abs(m$residuals))
+
+# summary(lm(abs(m$residuals) ~ m$fitted.values))
+# car::leveneTest(yield ~ gen , data = df)
+
+# check for normality 
+car::qqPlot(m)
+
+# shapiro.test(m$residuals)
+
+```
+
+```{r}
+car::Anova(m, type = 2)
+emmeans::emmeans(m, ~gen)
+
+```
+```{r}
+attach(df)
+ExpDes::rbd(gen, rep, yield, quali = T,)
+```
+
+
+
+```{r}
+df2 <- df |> filter(rep %in% c("R1", "R4"))
+
+# find out how many levels for trt factor "genotype"
+n_distinct(df2$gen)
+# find out how many blocks
+n_distinct(df2$rep)
+
+# fit the same model with the new (smaller) data
+m2 <- lm(yield ~ gen + rep, data= df2)
+
+# check assumptions
+plot(m2$fitted.values, abs(m2$residuals))
+car::qqPlot(m2)
+
+# see how DF of the error change!
+car::Anova(m, type = 2)
+car::Anova(m2, type = 2)
+```
+

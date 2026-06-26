@@ -1,0 +1,112 @@
+---
+title: "Assignment2_Hintz"
+author: "Hintz A."
+date: "2026-06-22"
+output: html_document
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = F)
+knitr::opts_chunk$set(warning = F)
+```
+
+```{css, echo = FALSE}
+body {
+  text-align: justify;
+  font-size: 16px;
+}
+```
+
+1. A group of agricultural scientists have received funding to study the effects of water availability and nitrogen fertilizer on corn yield. They know that the effect of nitrogen may depend on the water availability and they have enough resources to study 3 irrigation regimes that mimick dry years, average years, and wet years. At the same time, they wish to study three levels of Nitrogen fertilizer: the farmer's most common rate, farmer's + 200 lb N/ac, and farmer's - 200 lb N/ac. The scientists can run this experiment in a field that historically has always showed very low spatial variability. 
+
+a. What treatment structure would you use? How many levels for each factor?   
+
+The treatment structure consists of two factors:
+
+- Irrigation: 3 levels (dry year, average year, and wet year conditions).
+
+- Nitrogen fertilizer: 3 levels (common rate, common rate + 200 lb N/ac, and common rate − 200 lb N/ac).
+
+Therefore, the experiment follows a 3 × 3 factorial treatment structure, resulting in 9 treatment combinations.
+
+b. What design structure would you use? 
+
+Since the field has historically shown very low spatial variability, a Completely Randomized Design (CRD) would be appropriate.
+
+
+c. Fill out the following table with the values you consider:
+
+Assuming a 3 × 3 factorial experiment with 3 replications, there are:
+
+- Number of treatments = 9
+- Total experimental units = 9 × 3 = 27
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+t_design <- data.frame(Source = c("Factor A", "Factor B", "A x B", "Error", "Total"),
+                    df = c("2", "2", "4", "18", "26"))
+knitr::kable(t_design, caption = "")
+```
+
+d. Mention two strategies to increase the degrees of freedom of the error (see table above), show how they would increase said degrees of freedom, and discuss the implications in the conclusions of the study.  
+
+**Strategy 1:** Increase the number of replications
+
+The error degrees of freedom increase as the number of replications increases. For a factorial experiment:
+
+$$
+df_{Error} = ab(r-1)
+$$
+
+where:
+
+(a = 3) irrigation levels,
+(b = 3) nitrogen levels,
+(r) = number of replications.
+
+With 3 replications:
+
+$$
+df_{Error} = 3 \times 3 \times (3-1) = 18
+$$
+
+With 4 replications:
+
+$$
+df_{Error} = 3 \times 3 \times (4-1) = 27
+$$
+
+
+**Strategy 2**: Increase the number of levels per treatments
+
+For example, increasing the number of levels 3 to 4 for both factors we have
+
+$$
+df_{Error} = 4 \times 4 \times (3-1) = 32
+$$
+
+2. Find a publication from your domain (e.g., animal science, agronomy, etc.) and paste a snippet of the Materials and Methods section where they describe the designed experiment. Answer the following questions:  
+
+The article is [Growth and Yield Responses of Soybean to Row Spacing and Seeding Rate](https://doi.org/10.2134/agronj2010.0316)
+
+a. What is the treatment structure? How many levels for each factor?
+
+The study used a 3 way factorial treatment structure:
+
+- Variety (Maturity Group): 2 levels (early maturity group and late maturity group).
+
+- Row Spacing: 3 levels (0.19 m, 0.38 m, and 0.76 m).
+
+- Seeding Rate: 4 levels (321,000; 371,000; 420,000; and 469,000 seeds ha⁻¹).
+
+Therefore, the treatment structure is a 2 × 3 × 4 factorial arrangement, resulting in 24 treatment combinations.
+
+b. What is the design structure? 
+
+The experiment was conducted as a Randomized Complete Block Design (RCBD) arranged as a split-split-plot design with three replications.
+
+c. Would you change anything in the wording/writing to make it more understandable? 
+
+The Materials and Methods section is generally well written and provides a clear description of the experimental design and treatment structure. One possible improvement would be to include a field layout diagram showing the arrangement of blocks, main plots, subplots, and sub-subplots. Such a figure would help readers visualize the implementation of the split-split-plot design and better understand the randomization process.

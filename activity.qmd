@@ -1,0 +1,61 @@
+---
+title: "activity"
+format: html
+editor: visual
+---
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(lme4)
+library(agridat)
+library(ggpubr)
+```
+
+```{r}
+url <- "https://raw.githubusercontent.com/stat720/summer2026/refs/heads/main/data/data_inclass_06182026.csv"
+df <- read.csv(url)
+```
+
+```{r}
+View(df)
+```
+
+```{r}
+
+df |> ggplot(aes(x = col, y = row))+
+  geom_tile(aes(fill = block))
+  
+
+```
+
+```{r}
+df |>
+  filter(block == "B4") |> 
+  ggplot(aes(x = col, y = row))+
+  geom_tile(aes(fill = gen)) +
+  coord_fixed()
+```
+
+Model
+
+```{r}
+m <- lmer(yield ~ 1 + inoc*gen*dry*dust + (1|block/gen/dry:dust) , data = df)
+m
+```
+
+
+```{r}
+summary(m) 
+
+sigma(m)^2
+```
+
+
+```{r}
+library(emmeans)
+car::Anova(m, type =2)
+
+plot(emmeans(m, ~dust:dry))
+
+```
+

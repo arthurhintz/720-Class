@@ -1,0 +1,403 @@
+---
+title: "Project"
+author: "Hintz A"
+format: html
+editor: visual
+---
+
+Packages
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(readxl)
+library(sf)
+library(lme4)
+library(factoextra)
+library(ibd)
+library(gstat)
+library(sp)
+library(anticlust)
+library(agricolae)
+library(simr)
+library(cmdstanr)
+library(pbapply)
+library(posterior)
+library(geoR)
+library(lattice)
+
+```
+
+Data
+
+```{r, message=FALSE}
+data <- read_csv("projeto_data.csv") 
+
+EC_mat <- data |>
+  filter(row_id <=15) |> 
+  select(row_id, ew_group, ec_mean) |>
+  pivot_wider(
+    names_from = ew_group,
+    values_from = ec_mean
+  ) |>
+  arrange(row_id) |> 
+  select(-row_id) |>
+  as.matrix()
+
+```
+
+```{r}
+# geodados <- as.geodata(EC_mat)
+# 
+# hmax <- summary(geodados)[[3]][[2]]*0.8
+# 
+# 
+# vario <- variog(geodados,max.dist = hmax)
+# gau <- variofit(vario, cov.model = "gau")
+# 
+# 
+# plot(vario) +
+# lines(gau)
+```
+
+Plot
+
+```{r}
+image(EC_mat)
+```
+
+Cluster my data
+
+```{r}
+field_long <- as.data.frame(EC_mat) |>
+  mutate(linha = row_number()) |>
+  pivot_longer(
+    cols = -linha,
+    names_to = "coluna",
+    values_to = "valor"
+  ) |>
+  mutate(coluna = as.numeric(gsub("V", "", coluna)))
+
+field_long
+
+field_scaled <- scale(field_long)
+```
+
+Sets
+
+```{r}
+n = 15; k = 4
+D = n * k
+s <- 10
+n_treat <- 15
+treat <- paste0("T", 1:n_treat)
+
+n_block <- c(4, 6, 10, 12, 15, 20)
+
+set.seed(1248)
+
+
+model <- cmdstan_model("project.stan")
+
+results <- data.frame(
+  block_size = integer(),
+  mean_sigma = numeric(),
+  mean_power = numeric()
+)
+
+```
+
+Cluster my data
+
+```{r}
+
+for(b in n_block){
+  
+  print(b)
+  N_total <- nrow(field_long)
+  block_size <- N_total / b
+  
+  block_size <- as.integer(block_size)
+  
+  groups <- balanced_clustering(field_scaled, K = b) # b = número de blocos
+  field_cluster <- field_long |> mutate(Block = factor(groups))
+  
+  # offsets tem que ter o tamanho REAL do bloco, não b
+  offsets <- (0:(block_size - 1)) %% n_treat
+  skeleton <- map_dfr(0:(b - 1), function(i) {
+    idx <- (i + offsets) %% n_treat
+    tibble(block_idx = i + 1, treat_idx = idx + 1)
+  })
+
+   # no repeat treat in same block
+  all(skeleton |> count(block_idx, treat_idx) |> pull(n) == 1)
+
+# --- Step 2: randomize labels so the pattern isn't systematic ---
+  treat_map <- tibble(treat_idx = sample(1:n_treat), Treatment = treat)
+  block_map <- tibble(block_idx = sample(1:b), Block = factor(1:b))
+
+  design <- skeleton |>
+    left_join(treat_map, by = "treat_idx") |>
+    left_join(block_map, by = "block_idx") |>
+    select(Block, Treatment)
+
+# --- Step 3: attach treatments to your actual spatial plots ---
+field_end <- field_cluster |>
+  group_by(Block) |>
+  mutate(plot_in_block = row_number()) |>
+  ungroup() |>
+  left_join(
+    design |>
+      group_by(Block) |>
+      mutate(plot_in_block = sample(row_number())) |>  # randomize position in block
+      ungroup(),
+    by = c("Block", "plot_in_block")
+  )
+
+field_end <- field_end |>
+  mutate(
+    trt_id   = as.integer(factor(Treatment)),
+    block_id = as.integer(factor(Block))
+  )
+
+  #Stan
+
+  data_simu <- list(
+    N  = nrow(field_end),
+    K = n_treat,
+    J = b,
+    y  = field_end$valor,
+    coord = cbind(field_end$linha, field_end$coluna),
+    trt = field_end$trt_id,
+    blocks = field_end$block_id
+  )
+
+
+  sim <- model$sample(
+    data = data_simu,
+    chains = 1,
+    fixed_param = TRUE,
+    #parallel_chains = 4,
+    #iter_warmup     = 2000,   
+    iter_sampling   = 1000,    
+    seed            = 1248
+  )
+
+  #sim$diagnostic_summary()
+  
+  yrep <- sim$draws("y_rep", format = "matrix")
+
+  idx <- sample(seq_len(nrow(yrep)), 200)
+
+  power_vals <- numeric(length(idx))
+  sigma_vals <- numeric(length(idx))
+
+  for (k in seq_along(idx)) {
+  
+    i <- idx[k]
+  
+    dat_i <- field_end
+    dat_i$valor <- as.numeric(yrep[i, ])
+  
+    fit <- lmer(
+      valor ~ Treatment + (1 | Block),
+      data = dat_i,
+      REML = FALSE
+    )
+  
+    sigma_vals[k] <- sigma(fit)
+  
+    power <- powerSim(
+      fit,
+      test = fcompare(valor ~ (1 | Block)),
+      nsim = 10
+    )
+  # extract the power
+  power_vals[k] <- summary(power)$mean
+  }
+  
+  results <- rbind(results, data.frame(
+    block_size = b,
+    mean_sigma = mean(sigma_vals),
+    mean_power = mean(power_vals)
+  ))
+
+}
+
+```
+
+```{r}
+results
+write.table(results, "results.txt")
+```
+
+```{r}
+
+data_simu <- list(
+    N  = nrow(field_end),
+    K = n_treat,
+    J = b,
+    y  = field_end$valor,
+    coord = cbind(field_end$linha, field_end$coluna),
+    trt = field_end$trt_id,
+    blocks = field_end$block_id
+  )
+
+
+  sim <- model$sample(
+    data = data_simu,
+    chains = 1,
+    fixed_param = TRUE,
+    iter_sampling   = 1000,    
+    seed            = 1248
+  )
+
+
+for(b in n_block){
+  
+  print(b)
+  N_total <- nrow(field_long)
+  block_size <- N_total / b
+  
+  block_size <- as.integer(block_size)
+  
+  groups <- balanced_clustering(field_scaled, K = b) # b = número de blocos
+  field_cluster <- field_long |> mutate(Block = factor(groups))
+  
+  # offsets tem que ter o tamanho REAL do bloco, não b
+  offsets <- (0:(block_size - 1)) %% n_treat
+  skeleton <- map_dfr(0:(b - 1), function(i) {
+    idx <- (i + offsets) %% n_treat
+    tibble(block_idx = i + 1, treat_idx = idx + 1)
+  })
+
+   # no repeat treat in same block
+  all(skeleton |> count(block_idx, treat_idx) |> pull(n) == 1)
+
+# --- Step 2: randomize labels so the pattern isn't systematic ---
+  treat_map <- tibble(treat_idx = sample(1:n_treat), Treatment = treat)
+  block_map <- tibble(block_idx = sample(1:b), Block = factor(1:b))
+
+  design <- skeleton |>
+    left_join(treat_map, by = "treat_idx") |>
+    left_join(block_map, by = "block_idx") |>
+    select(Block, Treatment)
+
+# --- Step 3: attach treatments to your actual spatial plots ---
+field_end <- field_cluster |>
+  group_by(Block) |>
+  mutate(plot_in_block = row_number()) |>
+  ungroup() |>
+  left_join(
+    design |>
+      group_by(Block) |>
+      mutate(plot_in_block = sample(row_number())) |>  # randomize position in block
+      ungroup(),
+    by = c("Block", "plot_in_block")
+  )
+
+field_end <- field_end |>
+  mutate(
+    trt_id   = as.integer(factor(Treatment)),
+    block_id = as.integer(factor(Block))
+  )
+
+  
+  yrep <- sim$draws("y_rep", format = "matrix")
+
+  idx <- sample(seq_len(nrow(yrep)), 200)
+
+  
+  results <- rbind(results, data.frame(
+    block_size = b,
+    mean_sigma = mean(sigma_vals),
+    mean_power = mean(power_vals)
+  ))
+
+}
+
+```
+
+
+Trash, because I need to change for balanced clusters Cluster and I did in Stan
+
+```{r, echo=FALSE, eval=FALSE}
+
+# 1. Coordinates for every plot in the field
+coords <- expand.grid(row = 1:n, col = 1:k)
+
+# 2. Define the Gaussian semivariogram model
+#    - nugget : measurement noise
+#    - psill  : variance
+#    - range  : distance at which spatial correlation becomes negligible
+
+vmodel <- vgm(psill = s^2, model = "Gau", range = 5, nugget = 1)
+
+# 3. Set up an unconditional simulation generator 
+g_dummy <- gstat(formula = z ~ 1, locations = ~row + col, dummy = TRUE,
+                  beta = 0, model = vmodel, nmax = 20)
+
+# 4. Draw one realization on your grid
+set.seed(1)
+sim <- predict(g_dummy, newdata = coords, nsim = 1)
+
+# 5. Reshape the simulated spatial errors back into your n x k field
+spatial_error <- matrix(sim$sim1, nrow = n, ncol = k)
+
+# 6. Rebuild your field: trend (runif) + block effect (rbinom) + spatial error
+field <- matrix(NA, nrow = n, ncol = k)
+for (i in 1:n) {
+  field[i, ] <- runif(k) + rbinom(k, block, 0.5)
+}
+field <- field + spatial_error
+
+image(field)
+```
+
+```{r, echo=FALSE, eval=FALSE}
+ggplot(field_end,
+       aes(x = coluna,
+           y = linha,
+           fill = factor(Block))) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Treatment), size = 2) +
+  scale_y_reverse() +
+  coord_equal() +
+  labs(
+    x = "Coluna",
+    y = "Linha",
+    fill = "Cluster"
+  ) +
+  theme_minimal()
+```
+
+```{r, echo=FALSE, eval=FALSE}
+fviz_nbclust(field_scaled, kmeans, method = "wss")
+fviz_nbclust(field_scaled, kmeans, method = "silhouette", nboot = 300)
+set.seed(123)
+nc <- 5
+km <- kmeans(field_scaled,
+             centers = nc,
+             nstart = 50)
+field_cluster <- as.data.frame(field_long) |>
+  mutate(cluster = factor(km$cluster))
+```
+
+Figures
+
+```{r, echo=FALSE, eval=FALSE}
+ggplot(field_end,
+       aes(x = coluna,
+           y = linha,
+           fill = factor(Block))) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = treat_id), size = 2) +
+  scale_y_reverse() +
+  coord_equal() +
+  labs(
+    x = "Coluna",
+    y = "Linha",
+    fill = "Cluster"
+  ) +
+  theme_minimal()
+
+```

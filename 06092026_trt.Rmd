@@ -1,0 +1,57 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries
+```{r}
+library(tidyverse)
+library(emmeans)
+library(multcomp)
+```
+
+# Load data, little check to make sure everything is loaded well
+```{r}
+url <- "https://raw.githubusercontent.com/stat720/summer2025/refs/heads/main/data/blood_study_pigs.csv"
+df_pigs <- read.csv(url)
+str(df_pigs)
+
+df_pigs %>% 
+  ggplot(aes(paste(Trt, Day), Serum_haptoglobin_mg.dL))+
+  geom_point()
+```
+# Fit CRD model to the data 
+
+$$y_{ijk} = \mu + T_j + D_k + (TD)_{jk} + \varepsilon_{ijk}, \ \varepsilon_{ijk} \ \text{iid} \ N(0, 
+\sigma^2) $$ 
+
+```{r}
+model1 <- lm(Serum_haptoglobin_mg.dL ~ Trt * Day, data = df_pigs)
+ 
+# something's wrong - day is numeric
+
+df_pigs$Day <- as.factor(df_pigs$Day)
+
+model1 <- lm(Serum_haptoglobin_mg.dL ~ Trt * Day, data = df_pigs)
+
+#model checks
+plot(model1$fitted.values, model1$residuals)
+car::qqPlot(model1)
+```
+
+```{r}
+# anova
+car::Anova(model1, type = 2)
+```
+
+# Estimated Mg means
+```{r}
+means_all <- emmeans(model1, ~ Trt:Day)
+cld(means_all)
+```
+
+# What if we're interested in less comparisons
+```{r}
+means_38 <- emmeans(model1, ~ Trt:Day, at = list(Day = "38"))
+cld(means_38)
+```
+
