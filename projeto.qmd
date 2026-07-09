@@ -11,20 +11,18 @@ Packages
 library(tidyverse)
 library(readxl)
 library(sf)
-library(lme4)
 library(factoextra)
 library(ibd)
 library(gstat)
 library(sp)
 library(anticlust)
 library(agricolae)
-library(simr)
 library(cmdstanr)
 library(pbapply)
 library(posterior)
 library(geoR)
 library(lattice)
-
+library(parallel)
 ```
 
 Data
@@ -86,140 +84,265 @@ Sets
 
 ```{r}
 n = 15; k = 4
-D = n * k
-s <- 10
+N = n * k
+# s <- 10
 n_treat <- 15
 treat <- paste0("T", 1:n_treat)
+ 
+n_block <- c(1, 4, 6, 10, 15, 20)
 
-n_block <- c(4, 6, 10, 12, 15, 20)
+iter_sampling <- 10
+ncores <- detectCores() - 1
 
-set.seed(1248)
 
+sim_ec <- cmdstan_model("ec_generated.stan")
+sim_yield <- cmdstan_model("yield_gen.stan")
+model_fit <- cmdstan_model("fit_model.stan")
 
-model <- cmdstan_model("project.stan")
+# analytic prior sd per treatment, matching fit_model.stan exactly
+#prior_sigma <- c(2, rep(6, 4), rep(6, 4), rep(6, 3), rep(6, 3))  # T1, T2-5, T6-9, T10-12, T13-15
+#h_prior <- 0.5 * log(2 * pi * exp(1) * prior_sigma^2)
 
 results <- data.frame(
-  block_size = integer(),
-  mean_sigma = numeric(),
-  mean_power = numeric()
+  field = integer(),
+  block_n = integer(),
+  obs_id = integer(),
+  entropy = numeric(),
+  lower_ci = numeric(),
+  upper_ci = numeric(),
+  sigma = numeric(),
+  mean_post = numeric(),
+  posterior_prob = numeric()
 )
 
+coords <- expand.grid(Lat = 1:k, Long = 1:n)
+
+coords<- coords |> 
+  mutate(block_id = case_when(Long < 5 ~ 1,
+                              Long >=5 & Long < 9 ~ 2,
+                              Long >=9 & Long < 12 ~3,
+                              Long >= 12 ~4))
 ```
 
-Cluster my data
+Data generating
 
 ```{r}
-
-for(b in n_block){
-  
-  print(b)
-  N_total <- nrow(field_long)
-  block_size <- N_total / b
-  
-  block_size <- as.integer(block_size)
-  
-  groups <- balanced_clustering(field_scaled, K = b) # b = número de blocos
-  field_cluster <- field_long |> mutate(Block = factor(groups))
-  
-  # offsets tem que ter o tamanho REAL do bloco, não b
-  offsets <- (0:(block_size - 1)) %% n_treat
-  skeleton <- map_dfr(0:(b - 1), function(i) {
-    idx <- (i + offsets) %% n_treat
-    tibble(block_idx = i + 1, treat_idx = idx + 1)
-  })
-
-   # no repeat treat in same block
-  all(skeleton |> count(block_idx, treat_idx) |> pull(n) == 1)
-
-# --- Step 2: randomize labels so the pattern isn't systematic ---
-  treat_map <- tibble(treat_idx = sample(1:n_treat), Treatment = treat)
-  block_map <- tibble(block_idx = sample(1:b), Block = factor(1:b))
-
-  design <- skeleton |>
-    left_join(treat_map, by = "treat_idx") |>
-    left_join(block_map, by = "block_idx") |>
-    select(Block, Treatment)
-
-# --- Step 3: attach treatments to your actual spatial plots ---
-field_end <- field_cluster |>
-  group_by(Block) |>
-  mutate(plot_in_block = row_number()) |>
-  ungroup() |>
-  left_join(
-    design |>
-      group_by(Block) |>
-      mutate(plot_in_block = sample(row_number())) |>  # randomize position in block
-      ungroup(),
-    by = c("Block", "plot_in_block")
-  )
-
-field_end <- field_end |>
-  mutate(
-    trt_id   = as.integer(factor(Treatment)),
-    block_id = as.integer(factor(Block))
-  )
-
-  #Stan
-
-  data_simu <- list(
-    N  = nrow(field_end),
+data_simu <- list(
+    N  = N,
     K = n_treat,
-    J = b,
-    y  = field_end$valor,
-    coord = cbind(field_end$linha, field_end$coluna),
-    trt = field_end$trt_id,
-    blocks = field_end$block_id
+    J = k,
+    coord = as.matrix(coords[,c("Lat", "Long")]),
+    block_id = coords$block_id
   )
 
 
-  sim <- model$sample(
+  sim <- sim_ec$sample(
     data = data_simu,
     chains = 1,
     fixed_param = TRUE,
-    #parallel_chains = 4,
-    #iter_warmup     = 2000,   
-    iter_sampling   = 1000,    
-    seed            = 1248
+    iter_sampling   = iter_sampling,    
+    seed            = 124
   )
 
-  #sim$diagnostic_summary()
-  
-  yrep <- sim$draws("y_rep", format = "matrix")
 
-  idx <- sample(seq_len(nrow(yrep)), 200)
+ec_rep <- sim$draws("ec_rep", format = "matrix")
+```
 
-  power_vals <- numeric(length(idx))
-  sigma_vals <- numeric(length(idx))
+Function Randomize treatments
 
-  for (k in seq_along(idx)) {
+```{r}
+# Função auxiliar: aloca tratamentos aos blocos sem repetir dentro do bloco
+assign_treatments_no_repeat <- function(n_treat, r, b, block_size, max_tries = 1000) {
+  N <- n_treat * r
+  stopifnot(N == b * block_size)
   
-    i <- idx[k]
+  for (attempt in 1:max_tries) {
+    remaining <- rep(1:n_treat, times = r)   # cada tratamento tem r "fichas" a distribuir
+    block_list <- vector("list", b)
+    ok <- TRUE
+    
+    block_order <- sample(1:b)  # ordem aleatória de preenchimento dos blocos
+    
+    for (blk in block_order) {
+      avail_treats <- unique(remaining)       # tratamentos que ainda têm ficha sobrando
+      if (length(avail_treats) < block_size) {
+        ok <- FALSE
+        break                                  # essa tentativa não deu certo, tenta de novo
+      }
+      chosen <- sample(avail_treats, block_size, replace = FALSE)  # sem reposição -> sem repetir no bloco
+      block_list[[blk]] <- chosen
+      for (tt in chosen) {
+        remaining <- remaining[-match(tt, remaining)]  # consome uma ficha de cada escolhido
+      }
+    }
+    
+    if (ok && length(remaining) == 0) return(block_list)
+  }
+  stop("Não foi possível gerar alocação sem repetição após ", max_tries, " tentativas.")
+}
+```
+
+Loop
+
+```{r}
+for(i in 1:iter_sampling){
+  print(i)
   
-    dat_i <- field_end
-    dat_i$valor <- as.numeric(yrep[i, ])
+  ec_rep_i <- as.numeric(ec_rep[i,])
   
-    fit <- lmer(
-      valor ~ Treatment + (1 | Block),
-      data = dat_i,
-      REML = FALSE
+  
+  field <- cbind(coords, ec_rep_i)
+  
+  field_scaled <- scale(field)
+  
+
+  for(b in n_block){
+    
+  print(b)
+  N_total <- nrow(field)
+  block_size <- as.integer(N_total / b)
+  
+  r <- N_total / n_treat
+  stopifnot(r == round(r))
+  
+  if(b == 1){
+    # CRD - Completely Randomized Design
+    field_cluster <- field |> mutate(Block = 1L)
+    
+    trt_vec <- sample(rep(1:n_treat, times = r))  # embaralha os 60 rótulos
+    
+    design <- tibble(
+      Block         = 1L,
+      plot_in_block = 1:N_total,
+      trt_id        = trt_vec
+    ) |>
+      mutate(Treatment = treat[trt_id])
+    
+    # checagem
+    stopifnot(all(table(design$trt_id) == r))
+  } else {
+  
+  # With blocking  
+  groups <- balanced_clustering(field_scaled, K = b)
+  field_cluster <- field |> mutate(Block = as.integer(groups))
+  
+  # --- aloca tratamentos garantindo: r reps totais + sem repetir dentro do bloco ---
+  block_list <- assign_treatments_no_repeat(n_treat, r, b, block_size)
+  
+  design <- map_dfr(1:b, function(blk) {
+    tibble(
+      Block  = blk,
+      trt_id = sample(block_list[[blk]])   # embaralha a ordem dentro do bloco
     )
+  }) |>
+    group_by(Block) |>
+    mutate(plot_in_block = row_number()) |>
+    ungroup() |>
+    mutate(Treatment = treat[trt_id])
   
-    sigma_vals[k] <- sigma(fit)
+  # check
+  stopifnot(all(table(design$trt_id) == r))                       
+  stopifnot(all(design |> count(Block, trt_id) |> pull(n) == 1))  
   
-    power <- powerSim(
-      fit,
-      test = fcompare(valor ~ (1 | Block)),
-      nsim = 10
-    )
-  # extract the power
-  power_vals[k] <- summary(power)$mean
   }
   
+  # --- anexa aos plots espaciais reais ---
+  field_end <- field_cluster |>
+    group_by(Block) |>
+    mutate(plot_in_block = row_number()) |>
+    ungroup() |>
+    left_join(design, by = c("Block", "plot_in_block"))
+  
+  # table(field_end$Block)
+  # table(field_end$trt_id)
+  # table(field_end$trt_id, field_end$Block)
+  
+  field_end <- field_end |> mutate(Block = factor(Block))
+  
+  # Simulation Model Yield
+  data_sim <- list(
+    N  = N,
+    K = n_treat,
+    J = b,
+    coord = as.matrix(field_end[,c("Lat", "Long")]),
+    blocks = field_end$Block,
+    trt = field_end$trt_id,
+    ec = field_end$ec_rep_i
+  )
+  
+ 
+  yield_sim <- sim_yield$sample(
+    data = data_sim,
+    chains = 3,
+    fixed_param = TRUE,
+    iter_sampling   = 1,
+    seed            = 1234,
+    num_cores = ncores
+  )
+  
+  yield_rep <- sim$draws("y_rep", format = "matrix")
+  
+  # Fitting model
+  data_fit <- list(
+    N  = N,
+    K = n_treat,
+    J = b,
+    coord = as.matrix(field_end[,c("Lat", "Long")]),
+    blocks = field_end$Block,
+    trt = field_end$trt_id,
+    y = yield_rep
+  )
+  
+
+  fit <- model_fit$sample(
+    data = data_fit,
+    chains = 3,
+    parallel_chains = 3,
+    iter_warmup     = 200,
+    iter_sampling   = 100,
+    seed            = 1234,
+    num_cores = ncores
+  )
+  
+  # Saving Results
+  
+  
+  T_draws <- fit$draws("T", format = "matrix")
+  
+  post_summary <- t(apply(T_draws, 2, function(draws) {
+    s <- sd(draws)
+    q <- quantile(draws, c(0.025, 0.975))
+    c(mean = mean(draws), sigma = s,
+      entropy = 0.5 * log(2 * pi * exp(1) * s^2),
+      lower_ci = q[1], upper_ci = q[2])
+  }))
+  post_summary <- as.data.frame(post_summary)
+  post_summary$trt_id        <- 1:n_treat
+  
+  
+  # Contraste T1 vs cada um dos demais tratamentos
+  diff_draws <- sapply(2:n_treat, function(j)
+    T_draws[,1] - T_draws[,j]
+  )
+  
+  # Probabilidade posterior para cada contraste
+  prob <- apply(diff_draws, 2, function(x) mean(x < 0))
+
+  
+  # Maybe saving with the blocks and treatments assigned
   results <- rbind(results, data.frame(
-    block_size = b,
-    mean_sigma = mean(sigma_vals),
-    mean_power = mean(power_vals)
+    field         = i,
+    block_n       = b,
+    trt_id        = post_summary$trt_id,
+    entropy       = post_summary$entropy,
+    lower_ci      = post_summary$lower_ci,
+    upper_ci      = post_summary$upper_ci,
+    sigma         = post_summary$sigma,
+    mean_post     = post_summary$mean,
+    posterior_prob = c(NA, prob)
   ))
+
+  }  
 
 }
 
@@ -227,177 +350,13 @@ field_end <- field_end |>
 
 ```{r}
 results
-write.table(results, "results.txt")
+write.table(results, "results3.txt")
 ```
 
 ```{r}
-
-data_simu <- list(
-    N  = nrow(field_end),
-    K = n_treat,
-    J = b,
-    y  = field_end$valor,
-    coord = cbind(field_end$linha, field_end$coluna),
-    trt = field_end$trt_id,
-    blocks = field_end$block_id
-  )
-
-
-  sim <- model$sample(
-    data = data_simu,
-    chains = 1,
-    fixed_param = TRUE,
-    iter_sampling   = 1000,    
-    seed            = 1248
-  )
-
-
-for(b in n_block){
-  
-  print(b)
-  N_total <- nrow(field_long)
-  block_size <- N_total / b
-  
-  block_size <- as.integer(block_size)
-  
-  groups <- balanced_clustering(field_scaled, K = b) # b = número de blocos
-  field_cluster <- field_long |> mutate(Block = factor(groups))
-  
-  # offsets tem que ter o tamanho REAL do bloco, não b
-  offsets <- (0:(block_size - 1)) %% n_treat
-  skeleton <- map_dfr(0:(b - 1), function(i) {
-    idx <- (i + offsets) %% n_treat
-    tibble(block_idx = i + 1, treat_idx = idx + 1)
-  })
-
-   # no repeat treat in same block
-  all(skeleton |> count(block_idx, treat_idx) |> pull(n) == 1)
-
-# --- Step 2: randomize labels so the pattern isn't systematic ---
-  treat_map <- tibble(treat_idx = sample(1:n_treat), Treatment = treat)
-  block_map <- tibble(block_idx = sample(1:b), Block = factor(1:b))
-
-  design <- skeleton |>
-    left_join(treat_map, by = "treat_idx") |>
-    left_join(block_map, by = "block_idx") |>
-    select(Block, Treatment)
-
-# --- Step 3: attach treatments to your actual spatial plots ---
-field_end <- field_cluster |>
-  group_by(Block) |>
-  mutate(plot_in_block = row_number()) |>
-  ungroup() |>
-  left_join(
-    design |>
-      group_by(Block) |>
-      mutate(plot_in_block = sample(row_number())) |>  # randomize position in block
-      ungroup(),
-    by = c("Block", "plot_in_block")
-  )
-
-field_end <- field_end |>
-  mutate(
-    trt_id   = as.integer(factor(Treatment)),
-    block_id = as.integer(factor(Block))
-  )
-
-  
-  yrep <- sim$draws("y_rep", format = "matrix")
-
-  idx <- sample(seq_len(nrow(yrep)), 200)
-
-  
-  results <- rbind(results, data.frame(
-    block_size = b,
-    mean_sigma = mean(sigma_vals),
-    mean_power = mean(power_vals)
-  ))
-
-}
-
-```
-
-
-Trash, because I need to change for balanced clusters Cluster and I did in Stan
-
-```{r, echo=FALSE, eval=FALSE}
-
-# 1. Coordinates for every plot in the field
-coords <- expand.grid(row = 1:n, col = 1:k)
-
-# 2. Define the Gaussian semivariogram model
-#    - nugget : measurement noise
-#    - psill  : variance
-#    - range  : distance at which spatial correlation becomes negligible
-
-vmodel <- vgm(psill = s^2, model = "Gau", range = 5, nugget = 1)
-
-# 3. Set up an unconditional simulation generator 
-g_dummy <- gstat(formula = z ~ 1, locations = ~row + col, dummy = TRUE,
-                  beta = 0, model = vmodel, nmax = 20)
-
-# 4. Draw one realization on your grid
-set.seed(1)
-sim <- predict(g_dummy, newdata = coords, nsim = 1)
-
-# 5. Reshape the simulated spatial errors back into your n x k field
-spatial_error <- matrix(sim$sim1, nrow = n, ncol = k)
-
-# 6. Rebuild your field: trend (runif) + block effect (rbinom) + spatial error
-field <- matrix(NA, nrow = n, ncol = k)
-for (i in 1:n) {
-  field[i, ] <- runif(k) + rbinom(k, block, 0.5)
-}
-field <- field + spatial_error
-
-image(field)
-```
-
-```{r, echo=FALSE, eval=FALSE}
-ggplot(field_end,
-       aes(x = coluna,
-           y = linha,
-           fill = factor(Block))) +
-  geom_tile(color = "white") +
-  geom_text(aes(label = Treatment), size = 2) +
-  scale_y_reverse() +
-  coord_equal() +
-  labs(
-    x = "Coluna",
-    y = "Linha",
-    fill = "Cluster"
-  ) +
-  theme_minimal()
-```
-
-```{r, echo=FALSE, eval=FALSE}
-fviz_nbclust(field_scaled, kmeans, method = "wss")
-fviz_nbclust(field_scaled, kmeans, method = "silhouette", nboot = 300)
-set.seed(123)
-nc <- 5
-km <- kmeans(field_scaled,
-             centers = nc,
-             nstart = 50)
-field_cluster <- as.data.frame(field_long) |>
-  mutate(cluster = factor(km$cluster))
-```
-
-Figures
-
-```{r, echo=FALSE, eval=FALSE}
-ggplot(field_end,
-       aes(x = coluna,
-           y = linha,
-           fill = factor(Block))) +
-  geom_tile(color = "white") +
-  geom_text(aes(label = treat_id), size = 2) +
-  scale_y_reverse() +
-  coord_equal() +
-  labs(
-    x = "Coluna",
-    y = "Linha",
-    fill = "Cluster"
-  ) +
-  theme_minimal()
-
+results |> 
+  group_by(block_n, trt_id) |> 
+  filter(trt_id == 1) |> 
+  summarise(entropy = mean(entropy),
+            sigma = mean(sigma))
 ```
